@@ -16,11 +16,11 @@
 
 (define foo
 	(lambda (a b) 
-		(..+ a b)))
+		(.plus. a b)))
 
-;(define foo2
-;	(lambda (a b) 
-;		(+ (+ a b) (+ a b))))
+(define foo2
+	(lambda (a b c) 
+		(+ (+ a c) (+ b (+ c c)))))
 
 ;(define baz
 ;	(lambda (a)
