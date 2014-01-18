@@ -1,5 +1,6 @@
 open Printf
 open List
+open Int64
 
 let _s = sprintf and _sl = String.length and _ll  = List.length
 (********* Tokenize a string s containing a lisp-like expression. *************)
@@ -76,7 +77,7 @@ let rec parse lst =
 					if h.sym = s1 then f (c + 1) (h :: r) t else f c (h :: r) t
 		in f 0 [] lst	
 	and classify s =
-		try Int (Int64.of_string s.sym) 
+		try Int (of_string s.sym) 
 		with _ -> Symbol { name = s.sym; expr = Nil; sdbg = Some s.dbg }
 	in
 	let rec cons = function
@@ -91,11 +92,11 @@ let rec parse lst =
 						(classify h) :: (parse t)						
 
 (********************** Pretty print ******************************************)
-let cata f l = fold_left (fun a x -> a ^ x ^ " ") " " (map f l)
+let cata f l = String.concat " " (map f l)
 
 let rec string_expr = function
 	| Nil ->  "()"
-	| Int i -> Int64.to_string i
+	| Int i -> to_string i
 	| Symbol { name = n } -> n
 	| Cons (c,d) -> _s "(%s)" (string_cons(Cons (c, d))) 
 
@@ -183,50 +184,34 @@ let compile = compile [] []
 	
 (************************************ Assemble ********************************)
 
-type asm =
-	| FSymbol of string
-	| FInt of int64
-	| FVar of int
-	| FApply of asm list
-	| FClosure of (asm * symbol list * symbol list) 
-	| FGlobal of string * asm
-	| FPush of asm
-	| FCall of asm
-	 
 let rec assemble = function
-	| Quote (Symbol s) 	->  FSymbol s.name
-	| Quote (Int i)		->	FInt i
-	| Quote (Nil)		->	FInt (Int64.zero)
-	| Quote x			->	FSymbol (_s "can't assemble %s yet" (string_expr x)) 
-	| Var i				-> 	FVar i
-	| Application (f,a) ->  FApply ((map (fun x -> FPush (assemble x)) (rev a)) @ [FCall (assemble f)])
-	| Closure c			->  FClosure ((assemble c.code), c.env, c.args)
-	| Global (s, c)		->  FGlobal (s.name, assemble c)
+	| Quote (Nil) 		-> "0"
+	| Quote (Int i) 	-> to_string i
+	| Quote (Symbol s) 	-> s.name
+	| Var i				-> _s "[rsp + %d]" ((i + 1)*8)
+	| Application (Quote (Symbol s), a) -> if (ismacro s.name) then callmacro s a else "***" 
+	| Application (f, a)-> _s "%s %s" (assemble f) (cata assemble a)
+	| Global (s, Quote (Nil)) -> _s "%s = %s" s.name (assemble (Quote (Nil)))
+	| Global (s, Quote (Int i)) -> _s "%s = %s" s.name (assemble (Quote (Int i)))
+	| Global (s, Quote (Symbol n)) -> _s "%s = %s" s.name (assemble (Quote (Symbol n)))
+	| Global (s, Application (f, a)) -> _s "%s:\n%s" s.name (assemble (Application (f, a)))
+	| Global (s, Closure c) -> _s "%s:\n%s" s.name (assemble (Closure c))
+	| Closure { code = Quote (Int i); env = e; args = a } -> _s "\t%s\n\tret %s" (aout (assemble (Quote (Int i)))) (close e a 0)
+	| Closure { code = Quote (Symbol s); env = e; args = a } -> _s "\t%s\n\tret %s" (aout (assemble (Quote (Symbol s)))) (close e a 0)
+	| Closure { code = c; env = e; args = a } -> _s "\t%s\n\tret %s" (assemble c) (close e a 0)
+	| x					-> "Cannot assemble " ^ (string_code x)
 	
-let rec emit = function
-	(* Basic primitives *)
-	| FSymbol s 		->  s
-	| FInt i			->  _s "$%s" (Int64.to_string i)
-	| FVar i			->  _s "%d(%%rsp)" (i*8)
-	(* Globals *)
-	| FGlobal (s, FInt i) ->  _s "%s = %s" s (emit (FInt i))
-	| FGlobal (s, FSymbol t) ->  _s "%s = %s" s (emit (FSymbol t))
-	| FGlobal (s, a) 	->  _s ".text\n%s:%s" s (emit a)
- 	(* Parameter push and function calls *)
-	| FPush (FApply l)	->  (emit (FApply l)) ^ "\tpushq %rax"  
-	| FPush a			->  _s "\tpushq %s" (emit a) 
-	| FCall a			->  _s "\tCALL %s" (emit a) 
-	| FApply lst		->  fold_left (fun a x -> a ^ (_s "%s\n" (emit x))) "" lst 
-	(* Closures *)
-	| FClosure (FSymbol s, e, a) -> _s "\n\tmovq %s, %%rax\n\t%s" (emit (FSymbol s)) (ret e a)
-	| FClosure (FInt i, e, a)  -> _s "\n\tmovq %s, %%rax\n\t%s" (emit (FInt i)) (ret e a)
-	| FClosure (FVar i, e, a) -> _s "\n\tmovq %s, %%rax\n\t%s" (emit (FVar i)) (ret e a)
-	| FClosure (FApply lst, e, a) -> _s "\n%s\t%s" (emit (FApply lst)) (ret e a)
-	| FClosure ((FClosure (c, e, a)), e', a') -> _s "\n\tCLOSURE %d\n1$:\n%s" (_ll (a'@e'))  (emit (FClosure (c, e, a)))
-	| _	-> "Error assembling structure"
+and aout s = _s "mov rax, %s" s	
 
-and	ret e a = sprintf "ret $%d" (8*(length (e@a)))
+and close e a l =
+	let n =  of_int ((l + length (e@a)) * 8) in
+	assemble (Quote (Int n))	
 
+and ismacro s =  
+	s != "" && s.[0] = '.' && s = String.uppercase s
+	
+and callmacro s a =
+	_s "%s %s" s.name (String.concat ", " (map assemble a))
 
 (*************************** Test *********************************************)
 let read_file f =
@@ -244,9 +229,10 @@ let _ =
 		let p = parse t in
 		let c = map compile p in
 		let a = map assemble c in
-		let e = map emit a in
 		let oc = open_out_bin Sys.argv.(2) in
 		output_string oc ".include \"stdlib.inc\"\n\n";
-		iter2 (fun x y -> output_string oc (sprintf "/* %s */\n%s\n\n" (string_code x) y)) c e
+		iter2 (fun x y -> output_string oc (sprintf "/* %s */\n%s\n\n" (string_code x) y)) c a
 
 
+
+let _ = printf "%b\n" (ismacro ".plus")

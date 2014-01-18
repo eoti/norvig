@@ -1,8 +1,10 @@
+.intel_syntax noprefix
 .altmacro
 
-.macro .plus. a b
-	.if a != %rax
-	movq a, %rax
-	.endif
-	addq b
+
+.macro .PLUS a b
+	.if \a != rax
+		mov rax, \a
+	.endif	
+	add rax, \b
 .endm
