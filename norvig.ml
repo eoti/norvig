@@ -8,10 +8,9 @@ type lex = {index: int; line: int; offset: int}
 type token = {sym: string; dbg: lex}
 type a = TSTR of int | TSYM of int | TCMT | TWS 
 
-let str s a b = String.sub s a (b - a + 1)
-
 let tokenize s =
 	let n = _sl s in
+	let str a b = String.sub s a (b - a + 1) in
 	let rec f i state dbg r =
 		if i >= n then r else
 		let j = i + 1 and k = i - 1 and esc = (i != 0) && s.[i-1] = '\\' 
@@ -19,24 +18,25 @@ let tokenize s =
 			{ index = i; line = dbg.line + 1; offset = 0 } else 
 			{ index = i; line = dbg.line; offset = dbg.offset + 1 }
 		in 
+		let tk i j = { sym = str i j; dbg = dbg } in
 		match s.[i] with
 		| ' ' | '\n' | '\t' | '\r' ->
 				(match state with 
-				 | TSYM x -> f j TWS ndbg ({ sym = str s x k; dbg = dbg }::r)
+				 | TSYM x -> f j TWS ndbg ((tk x k)::r)
 				 | TCMT   -> if s.[i] = '\n' then f j TWS ndbg r else f j state ndbg r
 				 | _     -> f j TWS ndbg r)
 		|'"' -> (match state with
-                 | TSTR x -> if esc then f j state ndbg r else f j TWS ndbg ({ sym = str s x i; dbg = dbg} :: r)
-		         | TSYM x -> f j (TSTR i) ndbg ({ sym = str s x k; dbg = dbg} :: r)
+                 | TSTR x -> if esc then f j state ndbg r else f j TWS ndbg ((tk x i) :: r)
+		         | TSYM x -> f j (TSTR i) ndbg ( (tk x k) :: r)
 				 | TWS    -> f j (TSTR i) ndbg r
 				 | _     -> f j state ndbg r)
 		|';' -> (match state with
-				 | TSYM x -> f j TWS ndbg ({ sym = str s x k; dbg = dbg} :: r)
+				 | TSYM x -> f j TWS ndbg ((tk x k) :: r)
 				 | _     -> f j TCMT ndbg r)
 		| '(' | ')' | '\'' ->
 				(match state with
-				 | TSYM x -> f j TWS ndbg ({ sym = str s i i; dbg = dbg} :: ({ sym = str s x k; dbg = dbg} :: r))
-				 | TWS    -> f j TWS ndbg ({ sym = str s i i; dbg = dbg} :: r)
+				 | TSYM x -> f j TWS ndbg ((tk i i) :: ((tk x k) :: r))
+				 | TWS    -> f j TWS ndbg ((tk i i) :: r)
 				 | _     -> f j state ndbg r)
 		| _  -> (match state with
 				 | TWS    -> f j (TSYM i) ndbg r
@@ -76,7 +76,8 @@ let rec parse lst =
 					if h.sym = s1 then f (c + 1) (h :: r) t else f c (h :: r) t
 		in f 0 [] lst	
 	and classify s =
-		try Int (Int64.of_string s.sym) with _ -> Symbol { name = s.sym; expr = Nil; sdbg = Some s.dbg }
+		try Int (Int64.of_string s.sym) 
+		with _ -> Symbol { name = s.sym; expr = Nil; sdbg = Some s.dbg }
 	in
 	let rec cons = function
 	| [] -> Nil
@@ -149,12 +150,11 @@ let transform_let args expr =
 let rec compile p e = function
 	| Symbol s -> env_lookup s p e
 	| Cons(Symbol { name = "let" }, Cons(args, Cons(expr, Nil))) -> compile p e (transform_let args expr)
-	| Cons(Symbol { name = "lambda" }, Cons(args, Cons(body, Nil))) -> let a = unsym (uncons args) in Closure { code = compile p (e @ a) body; env = e; args = a }
+	| Cons(Symbol { name = "lambda" }, Cons(args, Cons(body, Nil))) -> let a = unsym (uncons args) in Closure (unfold { code = compile p (e @ a) body; env = e; args = a })
 	| Cons(Symbol { name = "define" }, Cons(Symbol { name = name }, Cons(v, Nil) )) ->	Global (global_set name v, compile p e v)
 	| Cons(c, Nil) -> compile p e c
 	| Cons(func, args) -> (let a = uncons args in 
-						   let f = compile a e func 
-						   and a = map (compile p e) a in  Application (f, a))
+						   Application (compile a e func, map (compile p e) a))
 	| x 	-> Quote x
 	
 and env_lookup s p e = 
@@ -163,6 +163,22 @@ and env_lookup s p e =
 	| h :: t	-> if h.name = s.name then Var i else f (i + 1) t 
 	in f 0 e 
 
+and unfold c = 
+	let rec func i preplst outargs = function
+		| [] -> (i, preplst, outargs)
+		| Application(f, a) :: t -> 
+			let (j, l, o) = func (i) preplst [] a in
+			func (j+1) (l @ [Application(f, o)]) (outargs @ [Var j]) t
+		| h::t -> func i preplst (outargs @ [h]) t 	
+	in
+	match c.code with
+	| Application (f, a) -> let (i, l, o) = func (length (c.env @ c.args)) [] [] a in 
+		if l = [] then
+		{ code = Application (f, o); env = c.env; args = c.args}
+		else
+		{ code = Application (Quote Nil, l @ [Application (f, o)]); env = c.env; args = c.args}
+	| _ ->  c	
+	
 let compile = compile [] []	
 	
 (************************************ Assemble ********************************)
@@ -187,8 +203,6 @@ let rec assemble = function
 	| Closure c			->  FClosure ((assemble c.code), c.env, c.args)
 	| Global (s, c)		->  FGlobal (s.name, assemble c)
 	
-
-
 let rec emit = function
 	(* Basic primitives *)
 	| FSymbol s 		->  s
@@ -235,17 +249,4 @@ let _ =
 		output_string oc ".include \"stdlib.inc\"\n\n";
 		iter2 (fun x y -> output_string oc (sprintf "/* %s */\n%s\n\n" (string_code x) y)) c e
 
-(*
-let test f =
-	let s = read_file f in
-	let r = tokenize s in
-	let t = parse r in
-	let c = map compile t in
-	let a = map assemble c in
-	iter (fun x -> printf "PARSE:\t%s\n" (string_expr x)) t; 
-	iter (fun x -> printf "COMPILE:\t%s\n" (string_code x)) c; 	
-	iter (fun x -> printf "ASSEMBLE:\n%s\n" (emit x)) a; 	
-	iter (fun x -> printf "GLOBAL:\t%s %s\n" x.name (string_expr x.expr)) !global_env	
-		
-let _ = test Sys.argv.(1)
-*)
+
