@@ -169,16 +169,25 @@ and unfold c =
 		| [] -> (i, preplst, outargs)
 		| Application(f, a) :: t -> 
 			let (j, l, o) = func (i) preplst [] a in
-			func (j+1) (l @ [Application(f, o)]) (outargs @ [Var j]) t
+			func (j-1) (l @ [Application(f, o)]) (outargs @ [Var j]) t
 		| h::t -> func i preplst (outargs @ [h]) t 	
 	in
 	match c.code with
-	| Application (f, a) -> let (i, l, o) = func (length (c.env @ c.args)) [] [] a in 
+	| Application (f, a) -> let (i, l, o) = func (-1) [] [] a in 
 		if l = [] then
-		{ code = Application (f, o); env = c.env; args = c.args}
+		{ code = Application (f, o); env = c.env; args = c.args }
 		else
-		{ code = Application (Quote Nil, l @ [Application (f, o)]); env = c.env; args = c.args}
+		{ code = Application (Quote Nil, l @ [Application (f, o)]); env = c.env; args = c.args }
 	| _ ->  c	
+
+(*	
+and rebalance n = function
+	| Var i -> Var (i + n)
+	| Application (f, a) -> Application (rebalance n f, map (rebalance n) a)
+	| Closure c -> Closure { code = rebalance n c.code; env = c.env; args = c.args }
+	| Global (s, c) -> Global (s, rebalance n c)
+	| x	-> x
+*)	
 	
 let compile = compile [] []	
 	
@@ -233,6 +242,3 @@ let _ =
 		output_string oc ".include \"stdlib.inc\"\n\n";
 		iter2 (fun x y -> output_string oc (sprintf "/* %s */\n%s\n\n" (string_code x) y)) c a
 
-
-
-let _ = printf "%b\n" (ismacro ".plus")
