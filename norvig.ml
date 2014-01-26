@@ -154,15 +154,14 @@ let rec compile p e = function
 	| Cons(Symbol { name = "lambda" }, Cons(args, Cons(body, Nil))) -> let a = unsym (uncons args) in Closure (unfold { code = compile p (e @ a) body; env = e; args = a })
 	| Cons(Symbol { name = "define" }, Cons(Symbol { name = name }, Cons(v, Nil) )) ->	Global (global_set name v, compile p e v)
 	| Cons(c, Nil) -> compile p e c
-	| Cons(func, args) -> (let a = uncons args in 
-						   Application (compile a e func, map (compile p e) a))
+	| Cons(func, args) -> (let a = uncons args in Application (compile a e func, map (compile p e) a))
 	| x 	-> Quote x
 	
 and env_lookup s p e = 
 	let rec f i = function
 	| []		-> Quote (Symbol s)
 	| h :: t	-> if h.name = s.name then Var i else f (i + 1) t 
-	in f 0 e 
+	in f 1 e 
 
 and unfold c = 
 	let rec func i preplst outargs = function
@@ -180,14 +179,6 @@ and unfold c =
 		{ code = Application (Quote Nil, l @ [Application (f, o)]); env = c.env; args = c.args }
 	| _ ->  c	
 
-(*	
-and rebalance n = function
-	| Var i -> Var (i + n)
-	| Application (f, a) -> Application (rebalance n f, map (rebalance n) a)
-	| Closure c -> Closure { code = rebalance n c.code; env = c.env; args = c.args }
-	| Global (s, c) -> Global (s, rebalance n c)
-	| x	-> x
-*)	
 	
 let compile = compile [] []	
 	
@@ -197,7 +188,7 @@ let rec assemble = function
 	| Quote (Nil) 		-> "0"
 	| Quote (Int i) 	-> to_string i
 	| Quote (Symbol s) 	-> s.name
-	| Var i				-> _s "[rsp + %d]" ((i + 1)*8)
+	| Var i				-> _s "[rbp %+d]" (i*8)
 	| Application (Quote (Symbol s), a) -> if (ismacro s.name) then callmacro s a else "***" 
 	| Application (f, a)-> _s "%s %s" (assemble f) (cata assemble a)
 	| Global (s, Quote (Nil)) -> _s "%s = %s" s.name (assemble (Quote (Nil)))
@@ -241,4 +232,3 @@ let _ =
 		let oc = open_out_bin Sys.argv.(2) in
 		output_string oc ".include \"stdlib.inc\"\n\n";
 		iter2 (fun x y -> output_string oc (sprintf "/* %s */\n%s\n\n" (string_code x) y)) c a
-
