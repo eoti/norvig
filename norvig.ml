@@ -55,16 +55,18 @@ type lisp_expr =
 
 and lisp_code =
 	| Quote of lisp_expr
+	| Local of int
 	| Var of int
 	| Application of lisp_code * (lisp_code list)
 	| Closure of closure
+	| Function of closure
 	| Global of symbol * lisp_code
 
 and symbol = 
 	{ name: string; expr: lisp_expr; sdbg: lex option }
 	
 and closure =
-	{ code: lisp_code; env: symbol list; args: symbol list }	
+	{ code: lisp_code; env: symbol list; args: symbol list; local: int }	
 	
 let rec parse lst = 
 	let match_paren s1 s2 dbg lst =
@@ -102,9 +104,11 @@ let rec string_expr = function
 
 and string_code  = function
 	| Quote e		-> _s "'%s" (string_expr e)
+	| Local i		-> _s "(#local %d)" i
 	| Var i			-> _s "(#var %d)" i
 	| Application (c, a) 	-> _s "(#application %s %s)" (string_code c) (cata string_code a)
-	| Closure c 	-> _s "(#build_closure %s [e: %s][a: %s])" (string_code c.code) (cata (fun x -> x.name) c.env) (cata (fun x -> x.name) c.args)
+	| Function c 	-> _s "(#function %s [e: %s][a: %s][l: %d])" (string_code c.code) (cata (fun x -> x.name) c.env) (cata (fun x -> x.name) c.args) c.local
+	| Closure c 	-> _s "(#closure %s [e: %s][a: %s][l: %d])" (string_code c.code) (cata (fun x -> x.name) c.env) (cata (fun x -> x.name) c.args) c.local
 	| Global (s, c)	-> _s "(#global_set %s %s)" s.name (string_code c)
 
 and string_cons = function
@@ -138,6 +142,7 @@ let unsym =
 			Symbol s 	-> s 
 			| _ 		-> failwith ("Cannot unsym " ^ (string_expr x)))	
 
+
 let rec unpair = function
 	| Cons(Symbol s, Cons(e, Nil))				-> (Cons(Symbol s, Nil), Cons(e, Nil))
 	| Cons(Cons(Symbol s, Cons(e, Nil)), Nil)	-> (Cons(Symbol s, Nil), Cons(e, Nil))
@@ -148,10 +153,11 @@ let transform_let args expr =
 	let (s, e) = unpair args in
 	Cons(Cons(Symbol { name = "lambda"; expr = Nil; sdbg = None }, Cons(s, Cons(expr, Nil))), e) 
 
+
 let rec compile p e = function
 	| Symbol s -> env_lookup s p e
 	| Cons(Symbol { name = "let" }, Cons(args, Cons(expr, Nil))) -> compile p e (transform_let args expr)
-	| Cons(Symbol { name = "lambda" }, Cons(args, Cons(body, Nil))) -> let a = unsym (uncons args) in Closure (unfold { code = compile p (e @ a) body; env = e; args = a })
+	| Cons(Symbol { name = "lambda" }, Cons(args, Cons(body, Nil))) -> let a = unsym (uncons args) in unfold { code = compile p (e @ a) body; env = e; args = a; local = 0 }
 	| Cons(Symbol { name = "define" }, Cons(Symbol { name = name }, Cons(v, Nil) )) ->	Global (global_set name v, compile p e v)
 	| Cons(c, Nil) -> compile p e c
 	| Cons(func, args) -> (let a = uncons args in Application (compile a e func, map (compile p e) a))
@@ -161,57 +167,87 @@ and env_lookup s p e =
 	let rec f i = function
 	| []		-> Quote (Symbol s)
 	| h :: t	-> if h.name = s.name then Var i else f (i + 1) t 
-	in f 1 e 
+	in f 0 e 
 
 and unfold c = 
 	let rec func i preplst outargs = function
 		| [] -> (i, preplst, outargs)
 		| Application(f, a) :: t -> 
-			let (j, l, o) = func (i) preplst [] a in
-			func (j-1) (l @ [Application(f, o)]) (outargs @ [Var j]) t
+			let (j, l, o) = func i preplst [] a in
+			func (j+1) (l @ [Application(f, o)]) (outargs @ [Local j]) t
 		| h::t -> func i preplst (outargs @ [h]) t 	
 	in
 	match c.code with
-	| Application (f, a) -> let (i, l, o) = func (-1) [] [] a in 
+	| Application (f, a) -> let (i, l, o) = func 0 [] [] (rev a) in 
 		if l = [] then
-		{ code = Application (f, o); env = c.env; args = c.args }
+		Function { code = Application (f, o); env = c.env; args = c.args; local = 0 }
 		else
-		{ code = Application (Quote Nil, l @ [Application (f, o)]); env = c.env; args = c.args }
-	| _ ->  c	
+		Function { code = Application (Quote Nil, l @ [Application (f, o)]); env = c.env; args = c.args; local = length l }
+	| Quote _ | Local _ | Var _ -> Function c	
+	| _ ->  Closure c	
 
 	
 let compile = compile [] []	
 	
 (************************************ Assemble ********************************)
+let macros = ["+", ".add."; "-", ".sub."]
 
 let rec assemble = function
 	| Quote (Nil) 		-> "0"
 	| Quote (Int i) 	-> to_string i
 	| Quote (Symbol s) 	-> s.name
-	| Var i				-> _s "[rbp %+d]" (i*8)
-	| Application (Quote (Symbol s), a) -> if (ismacro s.name) then callmacro s a else "***" 
-	| Application (f, a)-> _s "%s %s" (assemble f) (cata assemble a)
-	| Global (s, Quote (Nil)) -> _s "%s = %s" s.name (assemble (Quote (Nil)))
-	| Global (s, Quote (Int i)) -> _s "%s = %s" s.name (assemble (Quote (Int i)))
-	| Global (s, Quote (Symbol n)) -> _s "%s = %s" s.name (assemble (Quote (Symbol n)))
-	| Global (s, Application (f, a)) -> _s "%s:\n%s" s.name (assemble (Application (f, a)))
-	| Global (s, Closure c) -> _s "%s:\n%s" s.name (assemble (Closure c))
-	| Closure { code = Quote (Int i); env = e; args = a } -> _s "\t%s\n\tret %s" (aout (assemble (Quote (Int i)))) (close e a 0)
-	| Closure { code = Quote (Symbol s); env = e; args = a } -> _s "\t%s\n\tret %s" (aout (assemble (Quote (Symbol s)))) (close e a 0)
-	| Closure { code = c; env = e; args = a } -> _s "\t%s\n\tret %s" (assemble c) (close e a 0)
+	| Var i				-> mkvar i
+	| Local i				-> mklocal i
+	| Application (Quote (Symbol s), a) -> callbyname s.name a
+	| Application (Function f, a) -> indent [label "1" (Function f); callbyname "1b" ((mapi (fun i x -> Var i) f.env) @ a)]
+	| Function { code = Quote x }	-> indent [(result (Quote x)); "ret"]
+	| Function { code = Var i   }	-> indent [(result (Var i)); "ret"]
+	| Function { code = Application (Quote Nil, a) }	-> indent ((statements a) @ ["ret"])
+	| Function { code = Application (f, a) }	-> indent [assemble (Application (f, a)); "ret"]
+	| Closure  { code = Function f; env = e; args = a } -> indent [build_closure "2f" e a; "ret"; label "2" (Function f)]
+	| Closure  { code = Closure c; env = e; args = a } -> indent [build_closure "3f" e a; "ret"; label "3" (Closure c)]
+	| Global (s, Quote x) -> _s "%s = %s" s.name (assemble (Quote x))
+	| Global (s, x) -> label s.name x
 	| x					-> "Cannot assemble " ^ (string_code x)
 	
-and aout s = _s "mov rax, %s" s	
-
-and close e a l =
-	let n =  of_int ((l + length (e@a)) * 8) in
-	assemble (Quote (Int n))	
-
-and ismacro s =  
-	s != "" && s.[0] = '.' && s = String.uppercase s
+and mkvar = function
+	| 0	-> "rdi"
+	| 1	-> "rsi"
+	| 2	-> "rdx"
+	| 3	-> "rcx"
+	| 4	-> "r8"
+	| 5	-> "r9"
+	| i	-> _s "[rbp+%d]" (8*(i-4))
 	
-and callmacro s a =
-	_s "%s %s" s.name (String.concat ", " (map assemble a))
+and mklocal i = _s "[rbp-%d]" ((i + 1)*8)
+
+and callbyname s a =
+	try 
+		let n = assoc s macros in
+		_s "%s %s" n (String.concat ", " (map assemble a))
+	with Not_found -> 	
+		_s "cinvoke %s %s" s (String.concat ", " (map assemble a))
+		
+and statements a = 
+	match a with
+	| h :: t -> fold_left (fun a x -> a @ ["push rax"] @ [assemble x]) [assemble h] t 
+	| _		 ->  map assemble a		
+
+and build_closure i e a =
+	let l = mapi (fun i x -> Var i) (e@a) in
+	_s "build_closure %s %s" i (String.concat ", " (map assemble l))
+
+and enter i =
+	_s "enter %d, 0" (i*8)
+	
+and result s =
+	_s "mov rax, %s" (assemble s)	
+	
+and label n c =
+	_s "%s:\n\t%s" n (assemble c)	
+
+and indent l =
+	(String.concat "\n\t" l)
 
 (*************************** Test *********************************************)
 let read_file f =
