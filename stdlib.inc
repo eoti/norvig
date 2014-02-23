@@ -188,14 +188,27 @@
 	.endr
 .endm
 
+.macro .if. f t c
+	mov rax,  c
+	cmp rax, 0
+	je 9
+	call t
+	jmp 10
+	9:
+	call f
+	10:
+.endm
+
+
 /*****************************************************************
 							RUNTIME
 *****************************************************************/
+
 
 .data
 .balign, 8
 stop: .quad .
 .lcomm memory, 1024
 top: .quad .
-brk: .quad offset(memory)
+brk: .quad memory
 

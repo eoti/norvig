@@ -2,7 +2,8 @@ open Printf
 open List
 open Int64
 
-let _s = sprintf and _sl = String.length and _ll  = List.length
+let _s = sprintf and _sl = String.length
+
 (********* Tokenize a string s containing a lisp-like expression. *************)
 
 type lex = {index: int; line: int; offset: int}
@@ -120,47 +121,29 @@ and string_cons = function
 (************************************ Compiler ********************************)
 let global_env = ref []
 
-let retrieve f l =
-	if exists f l then Some (find f l) else None
+let global_code = ref []
 
-let global_set name v =
+let mksym n = Symbol { name = n; expr = Nil; sdbg = None }	
+
+let rec global_set name v =
 	let symbol = 
 	(match (retrieve (fun n -> n.name = name) !global_env) with
 	| Some x -> { name = x.name; expr = v; sdbg = x.sdbg }
 	| None   -> { name = name ; expr = v; sdbg = None })
     in global_env := symbol :: !global_env ;
     symbol
-				
-let rec uncons = function
-	| Nil 				-> []
-	| Cons(car, cdr) 	-> car :: uncons cdr
-	| x 				-> failwith ("Cannot uncons " ^ (string_expr x))
+
+and retrieve f l =
+	if exists f l then Some (find f l) else None
 	
-let unsym = 
-	map (fun x -> 
-			match x with 
-			Symbol s 	-> s 
-			| _ 		-> failwith ("Cannot unsym " ^ (string_expr x)))	
-
-
-let rec unpair = function
-	| Cons(Symbol s, Cons(e, Nil))				-> (Cons(Symbol s, Nil), Cons(e, Nil))
-	| Cons(Cons(Symbol s, Cons(e, Nil)), Nil)	-> (Cons(Symbol s, Nil), Cons(e, Nil))
-	| Cons(Cons(Symbol s, Cons(e, Nil)), cdr)	-> let (a, b) = unpair cdr in (Cons(Symbol s, a), Cons(e, b))
-	| x -> failwith ("Cannot unpair " ^ (string_expr x))
-   
-let transform_let args expr =
-	let (s, e) = unpair args in
-	Cons(Cons(Symbol { name = "lambda"; expr = Nil; sdbg = None }, Cons(s, Cons(expr, Nil))), e) 
-
-
-let rec compile p e = function
+let rec pcompile p e = function
 	| Symbol s -> env_lookup s p e
-	| Cons(Symbol { name = "let" }, Cons(args, Cons(expr, Nil))) -> compile p e (transform_let args expr)
-	| Cons(Symbol { name = "lambda" }, Cons(args, Cons(body, Nil))) -> let a = unsym (uncons args) in unfold { code = compile p (e @ a) body; env = e; args = a; local = 0 }
-	| Cons(Symbol { name = "define" }, Cons(Symbol { name = name }, Cons(v, Nil) )) ->	Global (global_set name v, compile p e v)
-	| Cons(c, Nil) -> compile p e c
-	| Cons(func, args) -> (let a = uncons args in Application (compile a e func, map (compile p e) a))
+	| Cons(Symbol { name = "let" }, Cons(args, Cons(expr, Nil))) -> pcompile p e (transform_let args expr)
+	| Cons(Symbol { name = "lambda" }, Cons(args, Cons(body, Nil))) -> let a = unsym (uncons args) in unfold { code = pcompile p (e @ a) body; env = e; args = a; local = 0 }
+	| Cons(Symbol { name = "define" }, Cons(Symbol { name = name }, Cons(v, Nil) )) ->	Global (global_set name v, pcompile p e v)
+	| Cons(Symbol { name = "if" }, Cons(c, Cons(t, Cons(f, Nil)))) -> pcompile p e (transform_if c t f)
+	| Cons(c, Nil) -> pcompile p e c
+	| Cons(func, args) -> (let a = uncons args in Application (pcompile a e func, map (pcompile p e) a))
 	| x 	-> Quote x
 	
 and env_lookup s p e = 
@@ -174,50 +157,88 @@ and unfold c =
 		| [] -> (i, preplst, outargs)
 		| Application(f, a) :: t -> 
 			let (j, l, o) = func i preplst [] a in
-			func (j+1) (l @ [Application(f, o)]) (outargs @ [Local j]) t
+			func (j+1) (l @ [Application(defunc f, map defunc o)]) (outargs @ [Local j]) t
 		| h::t -> func i preplst (outargs @ [h]) t 	
 	in
 	match c.code with
 	| Application (f, a) -> let (i, l, o) = func 0 [] [] (rev a) in 
 		if l = [] then
-		Function { code = Application (f, o); env = c.env; args = c.args; local = 0 }
+		Function { code = Application (defunc f, map defunc o); env = c.env; args = c.args; local = 0 }
 		else
-		Function { code = Application (Quote Nil, l @ [Application (f, o)]); env = c.env; args = c.args; local = length l }
+		Function { code = Application (Quote Nil, l @ [Application (defunc f, map defunc o)]); env = c.env; args = c.args; local = length l }
 	| Quote _ | Local _ | Var _ -> Function c	
 	| _ ->  Closure c	
 
+and defunc = function
+	| Function c -> 
+		let i = Random.int 1000 in
+		let n = { name = _s "L%d" (i + length !global_code); expr = Nil; sdbg = None } in
+		global_code := (Global (n, Function c)) :: !global_code;
+		(Quote (Symbol n))
+	| x -> x
+
+and mklambda e =
+	Cons(mksym "lambda", Cons(Nil, Cons(e, Nil))) 	
+
+and transform_let args expr =
+	let (s, e) = unpair args in
+	Cons(Cons(mksym "lambda", Cons(s, Cons(expr, Nil))), e) 
+
+and transform_if c t f =
+	Cons(mksym "?", Cons(c, Cons(mklambda t, Cons(mklambda f, Nil))))
 	
-let compile = compile [] []	
+and unsym = 
+	map (fun x -> 
+			match x with 
+			Symbol s 	-> s 
+			| _ 		-> failwith ("Cannot unsym " ^ (string_expr x)))	
+
+and unpair = function
+	| Cons(Symbol s, Cons(e, Nil))				-> (Cons(Symbol s, Nil), Cons(e, Nil))
+	| Cons(Cons(Symbol s, Cons(e, Nil)), Nil)	-> (Cons(Symbol s, Nil), Cons(e, Nil))
+	| Cons(Cons(Symbol s, Cons(e, Nil)), cdr)	-> let (a, b) = unpair cdr in (Cons(Symbol s, a), Cons(e, b))
+	| x -> failwith ("Cannot unpair " ^ (string_expr x))
+
+and uncons = function
+	| Nil 				-> []
+	| Cons(car, cdr) 	-> car :: uncons cdr
+	| x 				-> failwith ("Cannot uncons " ^ (string_expr x))
+
+  
 	
 (************************************ Assemble ********************************)
-let macros = ["+", ".add."; "-", ".sub."]
+let macros = ["+", ".add."; "-", ".sub."; "?", ".if."]
+
+let unix = Sys.os_type = "Unix"
+
+let mapi f l = Array.to_list (Array.mapi f (Array.of_list l))
 
 let rec assemble = function
-	| Quote (Nil) 		-> "0"
+	| Quote (Nil) 		-> ""
 	| Quote (Int i) 	-> to_string i
 	| Quote (Symbol s) 	-> s.name
 	| Var i				-> mkvar i
-	| Local i				-> mklocal i
+	| Local i			-> mklocal i
 	| Application (Quote (Symbol s), a) -> callbyname s.name a
-	| Application (Function f, a) -> indent [label "1" (Function f); callbyname "1b" ((mapi (fun i x -> Var i) f.env) @ a)]
 	| Function { code = Quote x }	-> indent [(result (Quote x)); "ret"]
 	| Function { code = Var i   }	-> indent [(result (Var i)); "ret"]
+	| Function { code = Local i   }	-> indent [(result (Local i)); "ret"]
 	| Function { code = Application (Quote Nil, a) }	-> indent ((statements a) @ ["ret"])
 	| Function { code = Application (f, a) }	-> indent [assemble (Application (f, a)); "ret"]
-	| Closure  { code = Function f; env = e; args = a } -> indent [build_closure "2f" e a; "ret"; label "2" (Function f)]
-	| Closure  { code = Closure c; env = e; args = a } -> indent [build_closure "3f" e a; "ret"; label "3" (Closure c)]
+	| Closure  { code = Function f; env = e; args = a } -> indent [build_closure "1f" e a; "ret"; label "1" (Function f)]
+	| Closure  { code = Closure c; env = e; args = a } -> indent [build_closure "1f" e a; "ret"; label "1" (Closure c)]
 	| Global (s, Quote x) -> _s "%s = %s" s.name (assemble (Quote x))
 	| Global (s, x) -> label s.name x
 	| x					-> "Cannot assemble " ^ (string_code x)
 	
 and mkvar = function
-	| 0	-> "rdi"
-	| 1	-> "rsi"
-	| 2	-> "rdx"
-	| 3	-> "rcx"
-	| 4	-> "r8"
-	| 5	-> "r9"
-	| i	-> _s "[rbp+%d]" (8*(i-4))
+	| 0	-> if unix then "rdi" else "rcx"
+	| 1	-> if unix then "rsi" else "rdx"
+	| 2	-> if unix then "rdx" else "r8"
+	| 3	-> if unix then "rcx" else "r9"
+	| 4	-> if unix then "r8"  else "[rbp+16]"
+	| 5	-> if unix then "r9"  else "[rbp+24]"
+	| i	->  _s "[rbp+%d]" (if unix then (8*(i-4)) else (8*(i-2)))
 	
 and mklocal i = _s "[rbp-%d]" ((i + 1)*8)
 
@@ -249,6 +270,11 @@ and label n c =
 and indent l =
 	(String.concat "\n\t" l)
 
+let compile t = 
+	ignore(global_code := []); 
+	let c = pcompile [] [] t in
+	String.concat "\n" (map assemble (c :: !global_code))
+	
 (*************************** Test *********************************************)
 let read_file f =
 	let ic = open_in_bin f in
@@ -260,11 +286,11 @@ let _ =
 	if (Array.length Sys.argv) < 3 then
 		printf "Usage: %s <input-file> <output-file>\n" Sys.argv.(0)
 	else			
+		let _ = Random.self_init () in
 		let s = read_file Sys.argv.(1) in
 		let t = tokenize s in
 		let p = parse t in
 		let c = map compile p in
-		let a = map assemble c in
 		let oc = open_out_bin Sys.argv.(2) in
-		output_string oc ".include \"stdlib.inc\"\n\n";
-		iter2 (fun x y -> output_string oc (sprintf "/* %s */\n%s\n\n" (string_code x) y)) c a
+		output_string oc ".include \"stdlib.inc\"\n\n"; 
+		iter (fun x -> output_string oc (_s "%s\n\n" x)) c

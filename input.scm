@@ -6,6 +6,10 @@
 	(lambda ()
 		(3)))
 
+(define mka
+	(lambda (a)
+		(a)))
+
 (define mk6
 	(lambda ()
 		(+ pi pi)))
@@ -36,7 +40,7 @@
 
 (define foofun
 	(lambda (a b) 
-		(+ a ((lambda (c d) (+ c d)) a b))))
+		(+ a ((lambda (c d) (+ c d a)) a b))))
 
 
 (define foofunpi
@@ -67,4 +71,10 @@
     		(let ((d (+ c c)))
       			(+ d d)))))
 
+
+(define messy
+	(lambda (a b)
+  		(let ((c (+ a (((lambda () (pi))) ())  )))
+    		(let ((d (+ c c)))
+      			(+ d d)))))
 
